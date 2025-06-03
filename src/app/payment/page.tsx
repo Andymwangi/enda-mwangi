@@ -2,7 +2,7 @@
 import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js';
-import { ArrowLeft, CreditCard, Shield, CheckCircle, Loader2 } from 'lucide-react';
+import { ArrowLeft, CreditCard, Shield, CheckCircle, Loader2, AlertCircle } from 'lucide-react';
 import Link from 'next/link';
 import { getCurrencyByCountry, getExchangeRate } from '@/utils/currency';
 import { PaymentData } from '@/types/payment';
@@ -13,16 +13,27 @@ function PaymentContent() {
     const [paymentData, setPaymentData] = useState<PaymentData | null>(null);
     const [loading, setLoading] = useState(true);
     const [processing, setProcessing] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [userCountry, setUserCountry] = useState('US');
     const [localCurrency, setLocalCurrency] = useState({ currency: 'USD', symbol: '$' });
 
     useEffect(() => {
         const initializePayment = async () => {
             try {
-                // Get user's country from IP
-                const locationResponse = await fetch('https://ipapi.co/json/');
-                const locationData = await locationResponse.json();
-                const countryCode = locationData.country_code || 'US';
+                setError(null);
+
+                // Get user's country from IP (with fallback)
+                let countryCode = 'US';
+                try {
+                    const locationResponse = await fetch('https://ipapi.co/json/');
+                    if (locationResponse.ok) {
+                        const locationData = await locationResponse.json();
+                        countryCode = locationData.country_code || 'US';
+                    }
+                } catch (err) {
+                    console.warn('Failed to get user location, using US as default');
+                }
+
                 setUserCountry(countryCode);
 
                 // Get currency info
@@ -35,15 +46,20 @@ function PaymentContent() {
                 const service = searchParams.get('service') || '';
 
                 if (!packageName || !priceUSD || !service) {
-                    router.push('/');
+                    setError('Invalid payment parameters');
+                    setTimeout(() => router.push('/'), 3000);
                     return;
                 }
 
                 // Calculate local price
                 let localPrice = priceUSD;
                 if (currencyInfo.currency !== 'USD') {
-                    const exchangeRate = await getExchangeRate('USD', currencyInfo.currency);
-                    localPrice = priceUSD * exchangeRate;
+                    try {
+                        const exchangeRate = await getExchangeRate('USD', currencyInfo.currency);
+                        localPrice = priceUSD * exchangeRate;
+                    } catch (err) {
+                        console.warn('Failed to get exchange rate, using USD price');
+                    }
                 }
 
                 setPaymentData({
@@ -56,7 +72,8 @@ function PaymentContent() {
                 });
             } catch (error) {
                 console.error('Failed to initialize payment:', error);
-                router.push('/');
+                setError('Failed to initialize payment');
+                setTimeout(() => router.push('/'), 3000);
             } finally {
                 setLoading(false);
             }
@@ -66,9 +83,14 @@ function PaymentContent() {
     }, [searchParams, router]);
 
     const createOrder = async () => {
-        if (!paymentData) return '';
+        if (!paymentData) {
+            throw new Error('Payment data not available');
+        }
 
         try {
+            setError(null);
+            console.log('Creating order with data:', paymentData);
+
             const response = await fetch('/api/paypal/create-order', {
                 method: 'POST',
                 headers: {
@@ -82,17 +104,32 @@ function PaymentContent() {
                 }),
             });
 
-            const order = await response.json();
-            return order.id;
+            const responseData = await response.json();
+            console.log('Create order response:', responseData);
+
+            if (!response.ok) {
+                throw new Error(responseData.error || `HTTP ${response.status}`);
+            }
+
+            if (!responseData.id) {
+                throw new Error('No order ID returned from PayPal');
+            }
+
+            return responseData.id;
         } catch (error) {
             console.error('Error creating order:', error);
+            setError(error instanceof Error ? error.message : 'Failed to create order');
             throw error;
         }
     };
 
     const onApprove = async (data: any) => {
         setProcessing(true);
+        setError(null);
+
         try {
+            console.log('Approving order:', data.orderID);
+
             const response = await fetch('/api/paypal/capture-order', {
                 method: 'POST',
                 headers: {
@@ -104,22 +141,34 @@ function PaymentContent() {
             });
 
             const orderData = await response.json();
+            console.log('Capture order response:', orderData);
+
+            if (!response.ok) {
+                throw new Error(orderData.error || 'Failed to capture payment');
+            }
 
             if (orderData.status === 'COMPLETED') {
                 // Redirect to success page with order details
                 router.push(`/payment/success?orderId=${data.orderID}&package=${encodeURIComponent(paymentData?.packageName || '')}&service=${encodeURIComponent(paymentData?.service || '')}`);
             } else {
-                throw new Error('Payment not completed');
+                throw new Error(`Payment status: ${orderData.status}`);
             }
         } catch (error) {
             console.error('Error capturing order:', error);
-            router.push('/payment/error');
+            setError(error instanceof Error ? error.message : 'Payment processing failed');
+            setProcessing(false);
         }
     };
 
     const onError = (err: any) => {
         console.error('PayPal error:', err);
-        router.push('/payment/error');
+        setError('PayPal payment error occurred');
+        setProcessing(false);
+    };
+
+    const onCancel = () => {
+        console.log('Payment cancelled by user');
+        setProcessing(false);
     };
 
     if (loading) {
@@ -128,6 +177,21 @@ function PaymentContent() {
                 <div className="flex items-center space-x-2">
                     <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
                     <span className="text-gray-600">Loading payment details...</span>
+                </div>
+            </div>
+        );
+    }
+
+    if (error && !paymentData) {
+        return (
+            <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+                <div className="text-center max-w-md mx-auto p-6">
+                    <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+                    <h2 className="text-2xl font-bold text-gray-900 mb-4">Payment Error</h2>
+                    <p className="text-gray-600 mb-4">{error}</p>
+                    <Link href="/" className="text-blue-600 hover:text-blue-700">
+                        Return to Home
+                    </Link>
                 </div>
             </div>
         );
@@ -164,6 +228,16 @@ function PaymentContent() {
                         <h1 className="text-3xl font-bold text-gray-900 mb-2">Complete Your Payment</h1>
                         <p className="text-gray-600">Secure payment powered by PayPal</p>
                     </div>
+
+                    {/* Error Alert */}
+                    {error && (
+                        <div className="mb-6 bg-red-50 border border-red-200 rounded-lg p-4">
+                            <div className="flex items-center">
+                                <AlertCircle className="h-5 w-5 text-red-500 mr-2" />
+                                <span className="text-red-700">{error}</span>
+                            </div>
+                        </div>
+                    )}
 
                     <div className="grid lg:grid-cols-2 gap-8">
                         {/* Order Summary */}
@@ -248,9 +322,8 @@ function PaymentContent() {
                                             createOrder={createOrder}
                                             onApprove={onApprove}
                                             onError={onError}
-                                            onCancel={() => {
-                                                console.log('Payment cancelled');
-                                            }}
+                                            onCancel={onCancel}
+                                            disabled={processing}
                                         />
                                     </div>
                                 </PayPalScriptProvider>

@@ -1,26 +1,36 @@
-// src/app/api/paypal/capture-order/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
+const PAYPAL_CLIENT_ID = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID!;
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET!;
 const PAYPAL_BASE_URL = process.env.NODE_ENV === 'production'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com';
 
-async function getPayPalAccessToken() {
-    const auth = Buffer.from(
-        `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
-    ).toString('base64');
+async function getAccessToken() {
+    try {
+        const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
 
-    const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Basic ${auth}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'grant_type=client_credentials',
-    });
+        const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'grant_type=client_credentials',
+        });
 
-    const data = await response.json();
-    return data.access_token;
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('PayPal token error:', response.status, errorText);
+            throw new Error(`Failed to get access token: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.access_token;
+    } catch (error) {
+        console.error('Error getting access token:', error);
+        throw error;
+    }
 }
 
 export async function POST(request: NextRequest) {
@@ -34,74 +44,37 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const accessToken = await getPayPalAccessToken();
+        console.log('Capturing PayPal order:', orderID);
 
-        // Capture the payment
-        const captureResponse = await fetch(
-            `${PAYPAL_BASE_URL}/v2/checkout/orders/${orderID}/capture`,
-            {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json',
-                },
-            }
-        );
+        const accessToken = await getAccessToken();
 
-        const captureData = await captureResponse.json();
+        const response = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderID}/capture`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`,
+            },
+        });
 
-        if (captureData.status === 'COMPLETED') {
-            // Extract payment information
-            const payer = captureData.payer;
-            const purchaseUnit = captureData.purchase_units[0];
-            const capture = purchaseUnit.payments.captures[0];
+        const responseText = await response.text();
+        console.log('PayPal capture response:', responseText);
 
-            // Extract custom data from purchase unit description or custom_id
-            const customData = purchaseUnit.custom_id ? JSON.parse(purchaseUnit.custom_id) : {};
-
-            const paymentData = {
-                orderId: orderID,
-                customerEmail: payer.email_address,
-                customerName: `${payer.name.given_name} ${payer.name.surname}`,
-                service: customData.service || 'Professional Service',
-                packageName: customData.packageName || 'Standard Package',
-                amount: parseFloat(capture.amount.value),
-                currency: capture.amount.currency_code,
-            };
-
-            // Send confirmation emails
-            try {
-                const emailResponse = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/payment/send-confirmation`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(paymentData),
-                });
-
-                if (!emailResponse.ok) {
-                    console.error('Failed to send confirmation emails:', await emailResponse.text());
-                }
-            } catch (emailError) {
-                console.error('Email sending error:', emailError);
-                // Don't fail the payment if email fails
-            }
-
-            return NextResponse.json({
-                status: 'COMPLETED',
-                orderID,
-                paymentData,
-            });
-        } else {
+        if (!response.ok) {
+            console.error('PayPal order capture failed:', response.status, responseText);
             return NextResponse.json(
-                { error: 'Payment capture failed', details: captureData },
-                { status: 400 }
+                { error: 'Failed to capture PayPal order', details: responseText },
+                { status: response.status }
             );
         }
+
+        const order = JSON.parse(responseText);
+        console.log('PayPal order captured successfully:', order.id);
+
+        return NextResponse.json(order);
     } catch (error) {
-        console.error('PayPal capture error:', error);
+        console.error('PayPal order capture failed:', error);
         return NextResponse.json(
-            { error: 'Internal server error' },
+            { error: 'Failed to capture PayPal order', message: error instanceof Error ? error.message : 'Unknown error' },
             { status: 500 }
         );
     }

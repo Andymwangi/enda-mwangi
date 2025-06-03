@@ -1,32 +1,53 @@
-// src/app/api/paypal/create-order/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
+const PAYPAL_CLIENT_ID = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID!;
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET!;
 const PAYPAL_BASE_URL = process.env.NODE_ENV === 'production'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com';
 
-async function getPayPalAccessToken() {
-    const auth = Buffer.from(
-        `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
-    ).toString('base64');
+async function getAccessToken() {
+    try {
+        const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
 
-    const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Basic ${auth}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'grant_type=client_credentials',
-    });
+        const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'grant_type=client_credentials',
+        });
 
-    const data = await response.json();
-    return data.access_token;
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('PayPal token error:', response.status, errorText);
+            throw new Error(`Failed to get access token: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log('Access token obtained successfully');
+        return data.access_token;
+    } catch (error) {
+        console.error('Error getting access token:', error);
+        throw error;
+    }
 }
 
 export async function POST(request: NextRequest) {
     try {
+        // Validate environment variables
+        if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
+            console.error('Missing PayPal credentials');
+            return NextResponse.json(
+                { error: 'PayPal credentials not configured' },
+                { status: 500 }
+            );
+        }
+
         const { amount, currency, packageName, service } = await request.json();
 
+        // Validate input
         if (!amount || !currency || !packageName || !service) {
             return NextResponse.json(
                 { error: 'Missing required fields' },
@@ -34,78 +55,61 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const accessToken = await getPayPalAccessToken();
+        console.log('Creating PayPal order:', { amount, currency, packageName, service });
 
-        // Create custom data to store with the order
-        const customData = {
-            packageName,
-            service,
-        };
+        const accessToken = await getAccessToken();
 
         const orderData = {
             intent: 'CAPTURE',
             purchase_units: [
                 {
-                    custom_id: JSON.stringify(customData),
-                    description: `${service} - ${packageName}`,
                     amount: {
                         currency_code: currency,
-                        value: amount.toString(),
-                        breakdown: {
-                            item_total: {
-                                currency_code: currency,
-                                value: amount.toString(),
-                            },
-                        },
+                        value: amount.toFixed(2), // Ensure proper decimal formatting
                     },
-                    items: [
-                        {
-                            name: `${service} - ${packageName}`,
-                            description: `Professional ${service.toLowerCase()} service`,
-                            quantity: '1',
-                            unit_amount: {
-                                currency_code: currency,
-                                value: amount.toString(),
-                            },
-                            category: 'DIGITAL_GOODS',
-                        },
-                    ],
+                    description: `${service} - ${packageName}`,
                 },
             ],
             application_context: {
-                brand_name: 'Professional Services',
-                landing_page: 'NO_PREFERENCE',
-                user_action: 'PAY_NOW',
-                return_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/payment/success`,
-                cancel_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/payment/cancel`,
+                return_url: `${process.env.NEXT_PUBLIC_BASE_URL}/payment/success`,
+                cancel_url: `${process.env.NEXT_PUBLIC_BASE_URL}/payment/cancel`,
+                brand_name: "Your Company Name", // Add your brand name
+                landing_page: "NO_PREFERENCE",
+                user_action: "PAY_NOW"
             },
         };
+
+        console.log('PayPal order data:', JSON.stringify(orderData, null, 2));
 
         const response = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders`, {
             method: 'POST',
             headers: {
-                'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`,
             },
             body: JSON.stringify(orderData),
         });
 
-        const order = await response.json();
+        const responseText = await response.text();
+        console.log('PayPal response status:', response.status);
+        console.log('PayPal response:', responseText);
 
         if (!response.ok) {
-            console.error('PayPal order creation failed:', order);
+            console.error('PayPal order creation failed:', response.status, responseText);
             return NextResponse.json(
-                { error: 'Failed to create PayPal order', details: order },
-                { status: 400 }
+                { error: 'Failed to create PayPal order', details: responseText },
+                { status: response.status }
             );
         }
 
-        return NextResponse.json({ id: order.id });
+        const order = JSON.parse(responseText);
+        console.log('PayPal order created successfully:', order.id);
 
+        return NextResponse.json(order);
     } catch (error) {
-        console.error('PayPal create order error:', error);
+        console.error('PayPal order creation failed:', error);
         return NextResponse.json(
-            { error: 'Internal server error' },
+            { error: 'Failed to create PayPal order', message: error instanceof Error ? error.message : 'Unknown error' },
             { status: 500 }
         );
     }
