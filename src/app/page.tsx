@@ -148,7 +148,7 @@ export default function Home() {
                 <div className="relative">
                   <div className="w-80 h-80 mx-auto bg-gradient-to-br from-blue-100 to-blue-200 rounded-3xl overflow-hidden shadow-2xl">
                     <img
-                      src="/images/edna-profile.jpg"
+                      src="/images/edna-profile.jpeg"
                       alt="Edna Wanja Mwangi - Professional Career Consultant"
                       className="w-full h-full object-cover object-center"
                     />
